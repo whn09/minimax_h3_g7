@@ -50,4 +50,16 @@ prohibitions in it. GPU nodes cannot be SSH'd; everything is `ssh Jump` + `kubec
 `h3-serve` pod, with renders landing on the hostPath mount `/data/h3` (the pod's own writable layer
 is capped by `ephemeral-storage` and kubelet will evict the pod for exceeding it).
 
+**Check the kube context first, every time.** The jump host has carried two, and `h3-serve` lives in
+**`aim345-full`** (`arn:aws:eks:eu-south-2:579019700964:cluster/aim345-full`), not in `qual`:
+
+    ssh Jump 'export PATH=$HOME/bin:$PATH
+      kubectl config use-context arn:aws:eks:eu-south-2:579019700964:cluster/aim345-full'
+
+Under the wrong context `kubectl exec h3-serve` answers `Error from server (NotFound): pods
+"h3-serve" not found`, which reads exactly like the node having been recycled and the ~200 GB model
+cache having gone with it. It cost an hour of planning a rebuild that was not needed. `kubectl
+config current-context` is the first command of any session; if the API endpoint fails to resolve at
+all, that cluster is deleted, which is what happened to `qual`.
+
 **The machine bills ~$16/hour and the GPUs bill while idle.** Say so when a run is finished.

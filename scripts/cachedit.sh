@@ -81,7 +81,10 @@ stop
 if want C0 || want C1 || want C2; then
 echo "=== ref2va  fp8 + sage,  SGLANG_CACHE_DIT_ENABLED=true   (lossless reference: 134.29 s)" | tee -a $R
 log=$L/serve_ref2va_768p_cd.log; rm -f $log
-GPUS=8 TP=4 ULYSSES=2 LOGTAG=cd \
+# QUANT=fp8 IS NOT OPTIONAL AND IS NOT INHERITED. sglang_ref2va_arm.sh:58 defaults QUANT to EMPTY
+# (bf16) -- the opposite of sglang_base_arm.sh -- so omitting it silently serves an unquantized DiT
+# and dies loading the video VAE with 19 MB free of 33.7 GB. Measured, on the first run of this file.
+QUANT=fp8 GPUS=8 TP=4 ULYSSES=2 LOGTAG=cd \
   setsid nohup bash $V/sglang_ref2va_arm.sh serve 768 "${SAGE[@]}" \
     > $L/launch_cd_ref.log 2>&1 < /dev/null &
 sleep 15
@@ -100,7 +103,7 @@ fi
 if want D0 || want D1 || want D2; then
 echo "=== t2va@wide  fp8 + sage,  SGLANG_CACHE_DIT_ENABLED=true   (lossless reference: 85.64 s)" | tee -a $R
 log=$L/serve_base_768p_cd.log; rm -f $log
-GPUS=8 TP=4 ULYSSES=2 LOGTAG=cd \
+QUANT=fp8 GPUS=8 TP=4 ULYSSES=2 LOGTAG=cd \
   setsid nohup bash $V/sglang_base_arm.sh serve 768 "${SAGE[@]}" \
     > $L/launch_cd_base.log 2>&1 < /dev/null &
 sleep 15

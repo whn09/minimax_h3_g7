@@ -59,9 +59,10 @@ different shard-extraction path from the bf16 and online-fp8 arms that work.
   (unconditional after the trtllm early return at `:730`); `checkpoint_uses_native_qkv_layout`
   (defaults `False`, so the reorder *is* installed); the header flags
   (`packed_qkv=False, comfy_quant=False, scale_layout=linear, swap_nibbles=False` match the writer).
-- **The two 37.5 GB `nvfp4_{fl2va,ref2va}.safetensors` files are gone**, with the node-local NVMe of
-  the recycled g7 nodes. Re-running any arm above means re-downloading the snapshot and re-running
-  `quant.sh` (~2 min CPU per partition).
+- **The two 37.5 GB `nvfp4_{fl2va,ref2va}.safetensors` files still exist** on the `h3-serve` pod's
+  hostPath (`/data/h3/`, 199 GB HF cache alongside them, 6.4 T free). If a future session finds them
+  missing, check the **kube context** before concluding the disk was recycled — see README, "Access".
+  Rebuilding them is `quant.sh`, ~2 min CPU per partition, once the snapshot is on disk.
 
 ## TP=2 — measured, and the blocker is arithmetic, not a flag
 
