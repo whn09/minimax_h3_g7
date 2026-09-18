@@ -22,6 +22,167 @@ from and where their history still is.
 | `scripts/nvfp4c.sh` | the fixed NVFP4 arms. **The fastest configuration on this box**, at TP=1 × U=8. |
 | `scripts/sync.sh` | push the scripts to the pod. Also the one place the cross-repo dependency is written down. |
 
+## Quick start: run the fastest configuration
+
+**NVFP4 + `TP=1 × ULYSSES=8` + sage + Cache-DiT rdt 0.16.** 48.46 s ref2va / 33.54 s t2va for a
+25-step 768p 5-second clip, ~11.5 GB peak. Read *why* below; this section is just the commands. The
+one thing to understand before typing them: **this configuration stacks three approximations**
+(NVFP4 weights, sage attention, block caching), so watch the render — it is not the exact-math floor.
+For that, use `F3`/`G1` in `scripts/fp8off.sh` instead.
+
+### 0. Get onto the pod
+
+```bash
+ssh Jump 'export PATH=$HOME/bin:$PATH
+  kubectl config use-context arn:aws:eks:eu-south-2:579019700964:cluster/aim345-full
+  kubectl exec -it h3-serve -- bash'
+```
+
+Wrong kube context ⇒ `pods "h3-serve" not found`, which reads exactly like the node having been
+recycled. `kubectl config current-context` first, every session. Everything below runs **inside** the
+pod, in `/data/h3` (the hostPath mount — never write renders to the pod's own layer, kubelet evicts for
+`ephemeral-storage`).
+
+### 1. Preflight — three things must be true
+
+```bash
+# a) both converted checkpoints exist, 37 475 504 096 bytes each
+ls -l /data/h3/nvfp4c_ref2va.safetensors /data/h3/nvfp4c_fl2va.safetensors
+
+# b) sage is installed IN THIS CONTAINER (run from anywhere except /sgl-workspace/SageAttention,
+#    or the compiled extension shadows itself and a working build reads as a failure)
+cd /tmp && python -c 'import sageattention; print(sageattention.__file__)'
+
+# c) 8 GPUs, idle
+nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
+```
+
+If **(a)** is missing, rebuild: `cd /data/h3 && ARMS="C CB" bash nvfp4c.sh` (~3 min CPU per partition,
+needs the source `nvfp4_{ref2va,fl2va}.safetensors` from `quant.sh`). It refuses to write a file it
+could not verify, so a zero exit is the gate. If **(b)** is missing, you end up measuring the sdpa
+configuration and not this one — sage is worth 1.32–1.37× on its own, more than the whole topology
+change — which is why step 3 reads the backend back out of the log rather than trusting the flag. It
+must be built from source at `d1a57a5` with `TORCH_CUDA_ARCH_LIST=12.0` (~4 min at `MAX_JOBS=32`), and
+it lives only in that container's site-packages, so **deleting the pod deletes sage**.
+
+### 2. Start the server (ref2va)
+
+```bash
+cd /data/h3
+export ROOT=/data/h3/sglang VDNROOT=/data/h3 FRAMES=121 \
+       OUTDIR=/data/h3/pull/case REFDIR=/data/h3/ref
+export SGLANG_USE_RUNAI_MODEL_STREAMER=0   # MANDATORY: the streamer drops the safetensors metadata
+                                           # header, which is the only thing marking these tensors nvfp4
+export SGLANG_CACHE_DIT_ENABLED=true       # process-wide gate; the per-request knob picks the threshold
+
+QUANT= GPUS=8 TP=1 ULYSSES=8 LOGTAG=qs \
+  setsid nohup bash /data/h3/sglang_ref2va_arm.sh serve 768 \
+    --transformer-weights-path /data/h3/nvfp4c_ref2va.safetensors \
+    --dit-layerwise-offload --layerwise-offload-components text_encoder \
+    --image-encoder-cpu-offload --vae-cpu-offload \
+    --attention-backend sage_attn \
+    --component-attention-backends text_encoder=torch_sdpa,audio_vae=torch_sdpa,video_vae=torch_sdpa \
+    > /data/h3/sglang/logs/launch_qs.log 2>&1 < /dev/null &
+```
+
+Three of those are easy to get wrong and all three fail quietly:
+
+- **`QUANT=` (empty) is not optional.** It keeps `--quantization` off the command line so the file's own
+  header is the single source of precision. `sglang_base_arm.sh` defaults `QUANT=fp8` (the ref2va script
+  defaults to bf16 — *opposite* defaults), so on the t2va server this flag is what stops online fp8 being
+  switched on underneath an already-quantized file.
+- **Never pass `--quantization modelopt_fp4`.** It builds a second, empty config that wins.
+- **`--dit-layerwise-offload` is what makes TP=1 possible at all** — 37.5 GB unsharded does not fit in
+  32 GB, and Ulysses shards activations, not weights. Dropping it is a load OOM, not a slowdown.
+
+### 3. Wait for it, then check what actually loaded
+
+```bash
+L=/data/h3/sglang/logs/serve_ref2va_768p_qs.log
+until grep -q "fired up and ready to roll" $L; do sleep 10; done   # 70-120 s
+grep -m1 "Using .* attention backend" $L        # MUST say sage_attn
+grep -ohi "comfy_nvfp4\|nvfp4" $L | sort | uniq -c
+```
+
+The readiness string is `"The server is fired up and ready to roll!"`, **not** "Uvicorn running" —
+warmup happens after the socket opens, so a client firing on Uvicorn hits a mid-warmup server. If the
+backend line does not say `sage_attn`, stop and fix step 1(b) rather than spending a render.
+
+### 4. Render
+
+```bash
+CACHE=4:0.16:3 python /data/h3/sglang_case.py \
+  case=/data/h3/case_ir.txt task=ref2va tag=qs 768:25:121
+```
+
+`CACHE=warmup:rdt:mc` — `4:0.16:3` is the fast setting; `CACHE=off` in the same process is the control
+that reproduces 101 s, which is how you prove the cache is really doing the work. Expect:
+
+```
+    qs ref2va 768p  25 steps  121 f ( 5.04 s): E2E ... inference   48.46 s   1.94 s/step  peak 11788 MB
+```
+
+Then confirm it is video and not noise — this failure mode renders cleanly with no error in the log:
+
+```bash
+ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of csv=p=0 <the printed path>
+```
+
+**~0.9–1.2 Mbps is normal. ~12.5 Mbps is noise.** Structural check only — quality is still your call.
+
+### 5. t2va, if you want both
+
+Different server (port 30011), different script, different prompt file, and `label=wide` matters —
+`case_t2va_v2.txt` holds two arms of the same task and `task=t2va` alone renders both.
+
+```bash
+pkill -f '[s]glang.*serve'; sleep 12
+
+QUANT= GPUS=8 TP=1 ULYSSES=8 LOGTAG=qs \
+  setsid nohup bash /data/h3/sglang_base_arm.sh serve 768 \
+    --transformer-weights-path /data/h3/nvfp4c_fl2va.safetensors \
+    --dit-layerwise-offload --layerwise-offload-components text_encoder \
+    --image-encoder-cpu-offload --vae-cpu-offload \
+    --attention-backend sage_attn \
+    --component-attention-backends text_encoder=torch_sdpa,audio_vae=torch_sdpa,video_vae=torch_sdpa \
+    > /data/h3/sglang/logs/launch_qs_t2va.log 2>&1 < /dev/null &
+
+# readiness log is serve_base_768p_qs.log, then:
+CACHE=4:0.16:3 python /data/h3/sglang_case.py \
+  case=/data/h3/case_t2va_v2.txt task=t2va label=wide tag=qs 768:25:121
+```
+
+`nvfp4c_fl2va`, not `nvfp4c_t2va`: `MINIMAX_H3_TASK_PARTITIONS` maps t2va → fl2va, so the base server
+holds the FL2VA weight partition.
+
+### 6. Stop, because idle GPUs still bill
+
+```bash
+pkill -f '[s]glang.*serve'
+```
+
+**~$16/hour, and the eight GPUs bill whether or not anything is running.**
+
+### The lazy version
+
+Every command above is already an arm in `scripts/nvfp4c.sh`, with the readbacks and refusal gates
+wired in:
+
+```bash
+cd /data/h3 && ARMS=N8 setsid nohup bash nvfp4c.sh > sglang/logs/qs.log 2>&1 &   # ref2va
+cd /data/h3 && ARMS=N9 setsid nohup bash nvfp4c.sh > sglang/logs/qs.log 2>&1 &   # t2va
+```
+
+`ARMS` has no default worth relying on — unset, `want()` falls back to `C N4`, which reconverts the
+checkpoints and runs the TP=4 control instead of the fast arm. `N9` hard-codes `TP=1 ULYSSES=8`;
+`NVTP`/`NVUP` only reach `N7`.
+
+`N8`/`N9` each run **two** requests — `cache=off` first as the in-process control, then rdt 0.16 — so
+they take about 150 s of inference rather than 50. Results append to
+`/data/h3/sglang/logs/nvfp4c.txt`, and `NVFP4C_DONE` is the last line. Note that
+`ssh Jump 'kubectl exec …'` holds the stream open for a backgrounded process, which is why these launch
+under `setsid nohup` and are polled with separate short `exec` calls.
+
 ## The one thing to know before running anything
 
 **32 GB per card is the whole story.** `--quantization fp8` is *online*: the loader lands the
