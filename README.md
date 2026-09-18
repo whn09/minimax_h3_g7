@@ -14,10 +14,12 @@ from and where their history still is.
 | `G7.md` | the findings document. Read this first — it is the argument, not a changelog. |
 | `scripts/g7_sweep.sh` | the topology/precision sweep: what fits on 32 GB and what it costs. |
 | `scripts/sage.sh` | SageAttention 2 arms. **1.23× t2va / 1.32× ref2va** at slightly *lower* peak memory. |
-| `scripts/quant.sh` | offline NVFP4 conversion of the two DiT partitions. Pure CPU, ~10 min each. |
+| `scripts/quant.sh` | offline NVFP4 quantization of the two DiT partitions, ~10 min CPU each. Writes the *canonical* layout — feed it through `nvfp4_comfy_layout.py` before serving. |
 | `scripts/fp8_quantize_transformer.py` | offline **fp8** conversion. The qkv reorder in it is load-bearing — read its header. |
-| `scripts/fp8off.sh` | the offline-fp8 arms. **The fastest configuration on this box**, and exact math. |
-| `scripts/nvfp4.sh` | NVFP4 weights **stacked on sage**. Weight quantization alone is a regression at 768p. |
+| `scripts/fp8off.sh` | the offline-fp8 arms. The fastest **exact-math** configuration, and the sage quality gate (F6). |
+| `scripts/nvfp4.sh` | the first NVFP4 arms. They render **noise** — kept as the failure signature; use `nvfp4c.sh`. |
+| `scripts/nvfp4_comfy_layout.py` | rewrites an NVFP4 checkpoint into the layout the H3 loader *asserts*. Read its header: it is the diagnosis. |
+| `scripts/nvfp4c.sh` | the fixed NVFP4 arms. **The fastest configuration on this box**, at TP=1 × U=8. |
 | `scripts/sync.sh` | push the scripts to the pod. Also the one place the cross-repo dependency is written down. |
 
 ## The one thing to know before running anything
@@ -31,12 +33,22 @@ here is `TP=4 × ULYSSES=2` — pinned by the loader, not by the collectives —
 why the g7e project's numbers are not directly comparable to ours: that machine has 96 GB cards and
 every arm of theirs is TP=1.
 
-**The way out is an offline fp8 checkpoint, and it is the fastest thing on this box.** Pre-quantize the
-DiT with `scripts/fp8_quantize_transformer.py` and there is no cast to land, so `TP=2 × ULYSSES=4`
+**The way out is an offline checkpoint, and it removes the topology constraint entirely.** Pre-quantize
+the DiT with `scripts/fp8_quantize_transformer.py` and there is no cast to land, so `TP=2 × ULYSSES=4`
 loads and runs **1.12–1.15× faster than the online-fp8 TP=4 floor at ~40 % of the peak memory, and the
 gain adds no approximation the baseline did not already have** (sage and fp8 weights are in both) —
 119.43 s ref2va / 74.65 s t2va for a 5 s 768p clip at 25 steps, or 56.64 s / 38.66 s with Cache-DiT
 stacked on. G7.md §3.1.2.
+
+**The floor is one step further down: offline NVFP4 at `TP=1 × ULYSSES=8`.** Every all-reduce leaves the
+linears, and on a box with no NVLink that is worth 1.23× over TP=4 — **101.34 s ref2va / 64.62 s t2va**
+at 25 steps, or **48.46 s / 33.54 s** with Cache-DiT rdt 0.16, at ~11.5 GB peak. TP=1 needs
+`--dit-layerwise-offload` (nothing else shards 37.5 GB onto a 32 GB card) and NVFP4 needs
+`scripts/nvfp4_comfy_layout.py`, because **declaring a tensor `nvfp4` makes the H3 loader assert three
+layout properties of the file rather than read them** — swizzled scales, swapped nibbles, native qkv
+rows. Getting any one of them wrong renders noise with no error in the log, which is exactly what the
+first NVFP4 arms did. G7.md §3.2.3. NVFP4 is a coarser approximation than fp8 (round-trip 0.095 vs
+0.0265), so these renders need watching in a way the fp8 ones do not.
 
 ## This repo is not self-contained, on purpose
 

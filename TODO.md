@@ -1,38 +1,39 @@
-# Parked work on g7.48xlarge
+# Open and closed work on g7.48xlarge
 
-## NVFP4 — parked 2026-09-18. It loads, it is 7–9 % faster than sage alone, and it renders noise.
+**Nothing on this page is parked any more.** All four items below are answered; they are kept because
+each one carries a fact that would otherwise have to be rediscovered, and two of them record a
+conclusion this repo got wrong first.
 
-**Status: do not restart this without budget for the bisection below.** The gain being chased is
-78.45 s vs 85.64 s on t2va and 125.33 s vs 134.29 s on ref2va (§3.2.1), i.e. **7–9 % on top of
-SageAttention**, and the last unexplored axis costs at least three arms to bisect. Sage is already
-committed and working; this is the marginal lever, not the main one.
+## NVFP4 — **DONE and unparked 2026-09-18. It was a checkpoint-layout mismatch, and it is now the floor.**
 
-### What the failure looks like
+**Status: nothing left to do.** Built and measured: `scripts/nvfp4_comfy_layout.py` +
+`scripts/nvfp4c.sh`, results in **G7.md §3.2.3**. **101.34 s ref2va / 64.62 s t2va at TP=1 × U=8**
+with sage and `--dit-layerwise-offload`, and **48.46 s / 33.54 s** with Cache-DiT rdt 0.16 on top —
+2.77× / 2.57× over the online-fp8 TP=4 floor at ~11.5 GB peak. Both converted files are on the pod's
+hostPath: `nvfp4c_{ref2va,fl2va}.safetensors`, 37 475 504 096 bytes each, alongside the two original
+`nvfp4_*` files they were derived from.
 
-Both arms rendered a full-length, correctly-shaped mp4 with no error in the log, at **12.45–12.51
-Mbps against sage's 0.86–0.99 Mbps** — two independent arms within 0.5 % of each other. High bitrate
-with valid structure is what an h264 encoder produces from noise, and it is why this cannot be caught
-by anything except watching the video. Any future arm must be watched, not timed.
+### The cause, and the bisection that is retired unrun
 
-### The one hypothesis worth testing: tensor parallelism (G7.md §3.2.2)
+Not tensor parallelism. `resolve_minimax_h3_checkpoint_quantization`
+(`runtime/loader/minimax_h3_weights.py:61`, from `component_loaders/transformer_loader.py:315`) does
+not *infer* the layout of an nvfp4-marked H3 checkpoint — it **hard-codes** three properties of it
+(`:85-88`): `checkpoint_uses_native_qkv_layout = True`, `checkpoint_weight_scale_layout = "swizzled"`,
+`swap_weight_nibbles = True`. Our file is the opposite on all three, so the DiT multiplied by numbers
+unrelated to the model, and would have done so at TP=1 too. `CHECK=1` on
+`nvfp4_comfy_layout.py` proved it for **zero GPU time**: cos **−0.000** against the bf16 weights
+before the fix, cos 1.000 after. The three-arm bisection that used to be in this section is retired
+**unrun** — its item 2 would have spent an arm confirming the wrong hypothesis, and item 1 would have
+come back clean for the wrong reason.
 
-`grep -- "tp-size\|tp_size\|TP=\|张量并行"` over all 72 KB of the `minimax_h3_g7e` README returns
-**zero hits**. Every arm there is TP=1 on a 96 GB card, multi-card via Ulysses only. Our 32 GB cards
-force TP=4. Every other axis of their delivered recipe matches ours exactly. And
-`_copy_grouped_qkv_tp_shard` (`models/dits/minimax_h3.py:319`) demonstrably **refuses a packed 4-bit
-weight** — twice, on `packed_dim` and on `dtype not in (bfloat16, float8_e4m3fn)` — so NVFP4 takes a
-different shard-extraction path from the bf16 and online-fp8 arms that work.
-
-### Bisection, ranked by information per GPU-minute
-
-1. **Quantize everything except `qkv_proj`** — 156 layers instead of 208, one `QUANT_RE` edit,
-   ~2 min CPU per partition, no new serve topology. Clean render ⇒ the defect is the qkv row/scale
-   path under TP. Still noise ⇒ it is the FP4 GEMM or the row-parallel `out_proj` shard.
-2. **NVFP4 at TP=1 with `--dit-layerwise-offload`**, however slow. Speed is irrelevant here; it is
-   the only way to reach TP=1 on a 32 GB card, and it converts "TP is the suspect" into "TP is the
-   cause" in a single arm.
-3. **TP=2 × U=4** — only after 1 or 2 says the low-TP path is sound. See the TP=2 note below for why
-   this needs `--minimax-h3-adaln-online`, and why the flag does *not* do what §3.2.2 first claimed.
+**The carry-forward fact is the layout contract, not the diagnosis.** Declaring a layer `nvfp4` in an
+H3 checkpoint *asserts* the ComfyUI-kitchen convention — swizzled scales, high nibble = even index,
+qkv rows already `[q_all,k_all,v_all]`. The exporter therefore has to produce that, which is what
+`nvfp4_comfy_layout.py` does with the model's own `_reorder_grouped_qkv_to_qkv` plus a scale swizzle
+and a nibble swap. All three are pure permutations, so the converted file's round-trip error is
+exactly the source's 0.095. If those files ever have to be rebuilt: `nvfp4c.sh`'s `C`/`CB` arms,
+~3 min CPU each, and the script refuses to write unless it saw 208 quantized layers, 52 qkv reorders
+and a verified sample against the bf16 source (`worst cos=0.995 rel=0.095`).
 
 ### Things that must not be re-derived, and one that must not be redone
 
@@ -54,11 +55,20 @@ different shard-extraction path from the bf16 and online-fp8 arms that work.
   `wrote /data/h3/nvfp4_<v>.safetensors: 951 tensors (q=208 fp8=0 copy=327) worst rel=0.0951`.
   0.094 ± 0.002 is the group-16 round-to-nearest-e2m1 floor. Materially higher means the packing or
   the scales are wrong; materially lower is impossible and means the check compared the wrong tensor.
-- **Suspects already cleared, do not re-investigate:** the activation scale (`mg/modelopt_quant.py:671`
-  sets `missing_param_init="ones"` and #35740 preserves it deliberately); the TMA scale reshape
-  (unconditional after the trtllm early return at `:730`); `checkpoint_uses_native_qkv_layout`
-  (defaults `False`, so the reorder *is* installed); the header flags
-  (`packed_qkv=False, comfy_quant=False, scale_layout=linear, swap_nibbles=False` match the writer).
+- **Suspects genuinely cleared:** the activation scale (`mg/modelopt_quant.py:671` sets
+  `missing_param_init="ones"` and #35740 preserves it deliberately) and the TMA scale reshape
+  (unconditional after the trtllm early return at `:730`).
+- **Two suspects that were cleared *wrongly*, recorded so the mistake is not repeated.**
+  `checkpoint_uses_native_qkv_layout` was read as "defaults `False` (`configs/base_config.py:38`), so
+  the reorder *is* installed" — that is the **class default**, and `minimax_h3_weights.py:86` overrides
+  it to `True` for every nvfp4 checkpoint. And `_copy_grouped_qkv_tp_shard` refusing packed 4-bit
+  weights is **irrelevant**, because with the reorder never installed that function is unreachable for
+  NVFP4. Also: the header flags `scale_layout=linear, swap_nibbles=False` *did* match the writer — the
+  bug was that the reader does not read them.
+- **What the failure looked like, for pattern-matching next time.** A full-length, correctly-shaped mp4,
+  no error in the log, at **12.45–12.51 Mbps against sage's 0.86–0.99 Mbps** — high bitrate with valid
+  structure is what h264 produces from noise. The fixed arms all land at 0.93–1.17 Mbps. That band is a
+  structural check and not a quality gate: every approximate arm still has to be watched.
 - **The two 37.5 GB `nvfp4_{fl2va,ref2va}.safetensors` files still exist** on the `h3-serve` pod's
   hostPath (`/data/h3/`, 199 GB HF cache alongside them, 6.4 T free). If a future session finds them
   missing, check the **kube context** before concluding the disk was recycled — see README, "Access".
@@ -97,5 +107,7 @@ Nothing here is left to do. The one thing to carry forward if the files ever hav
 **declaring a layer `float8_e4m3fn` asserts the qkv rows are already native**, because
 `ComfyFp8Config.checkpoint_uses_native_qkv_layout = True` makes minimax_h3.py skip its own reorder —
 so the exporter must reorder, and it refuses to write unless it reordered exactly 52 and quantized
-exactly 208. This is the opposite of the NVFP4 contract above, where the config leaves that attribute
-`False` and the loader reorders.
+exactly 208. **NVFP4 asserts the same thing** (`minimax_h3_weights.py:86`) plus swizzled scales and
+swapped nibbles — the two contracts agree on qkv and NVFP4 adds two more axes. The earlier version of
+this note said the opposite, and that error is what parked NVFP4 for a week; see the NVFP4 section
+above.
