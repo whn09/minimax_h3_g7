@@ -197,4 +197,38 @@ if up $log && readback $log; then
 fi
 stop
 fi
+if want T4; then
+echo "=== T4  fp8 TP=2 x U=4, --dit-layerwise-offload   (does the ONLINE fp8 cast happen per layer?)" | tee -a $R
+# THE ONE ARM THAT DECIDES WHETHER fp8 AT TP=2 IS POSSIBLE AT ALL. Everything in this repo says it is
+# not, and the reasoning is arithmetic: --quantization fp8 is *online*, so the loader lands the
+# 65.65 GiB bf16 checkpoint on the cards and casts there, which at TP=2 is 32.8 GiB/card before the
+# cast against 31.37 GiB of card. That is why README says the fp8 optimum is pinned at TP=4 x U=2 "by
+# the loader, not by the collectives".
+#
+# But T3 changed the premise. --dit-layerwise-offload does not land the checkpoint at all -- it keeps
+# the block weights in host RAM and streams them per layer, which is exactly why T3 loads at TP=2 and
+# T1 does not. If the online fp8 cast runs inside that per-layer path, the peak is a few layers of
+# bf16 and not the whole DiT, and fp8 at TP=2 loads. T3 measured 11 428 MB peak, i.e. 20 GB of
+# headroom, so nothing else on the card can be the obstacle.
+#
+# What each outcome means, so this is not a fishing arm:
+#   loads and runs  -> fp8's 4.21 s/step at TP=2's memory, and TODO.md's "the only configuration that
+#                      could win is an OFFLINE fp8 checkpoint" is wrong and must be corrected.
+#   OOM in the load -> the cast is post-load (whole-DiT), the arithmetic stands, and the offline
+#                      exporter really is the only route. Either way the question closes for ~4 min.
+# CACHE=off for the same reason as T1-T3: SGLANG_CACHE_DIT_ENABLED is exported process-wide above and
+# a request that sends no cache fields silently inherits the env defaults (rdt=0.24, mc=3), which is
+# what produced a fictitious 61.21 s on the first T3 run.
+log=$L/serve_ref2va_768p_tp2fp8.log; rm -f $log
+QUANT=fp8 GPUS=8 TP=2 ULYSSES=4 LOGTAG=tp2fp8 \
+  setsid nohup bash $V/sglang_ref2va_arm.sh serve 768 \
+    --dit-layerwise-offload --layerwise-offload-components text_encoder \
+    --image-encoder-cpu-offload --vae-cpu-offload "${SAGE[@]}" \
+    > $L/launch_tp2_d.log 2>&1 < /dev/null &
+sleep 15
+if up $log && readback $log; then
+  CACHE=off python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2fp8 768:25:121 2>&1 | tee -a $R
+fi
+stop
+fi
 echo CACHEDIT_DONE | tee -a $R

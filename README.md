@@ -22,7 +22,10 @@ from and where their history still is.
 
 **32 GB per card is the whole story.** `--quantization fp8` is *online*: the loader lands the
 65.65 GiB bf16 checkpoint on the cards and casts there, so pure Ulysses (which replicates the DiT on
-every card) cannot load at all. Every arm here is therefore `TP=4 × ULYSSES=2`, and that constraint
+every card) cannot load at all. **`--dit-layerwise-offload` does not rescue it either** — it makes
+*bf16* load at TP=2 (11.4 GB peak, G7.md §3.1.1) but fp8 still OOMs at 29.47 GiB in the loader, because
+the quantized path materialises parameters on device to attach weight scales. Every arm here is
+therefore `TP=4 × ULYSSES=2` — pinned by the loader, not by the collectives — and that constraint
 is also why the g7e project's numbers are not directly comparable to ours — that machine has 96 GB
 cards and every arm of theirs is TP=1.
 

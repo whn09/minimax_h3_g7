@@ -79,6 +79,20 @@ to the same 1/8, so halving TP buys nothing on the activation side and costs 15.
 Even if it fit it would not win: bf16 (the only precision `--minimax-h3-adaln-online` accepts) costs
 +19.7 % per step against fp8, versus a 10–15 % topology gain from halving TP.
 
-The only configuration that could win is an **offline fp8 checkpoint** at TP=2 — 15.5 GB/card *and*
-fp8's 4.21 s/step. `quantization_utils.py:409` accepts `["float8_e4m3fn"]` as a format set, so this
-is a project (write an fp8 exporter alongside `quant.sh`), not a flag. Not started.
+**Online fp8 at TP=2 is closed, measured, not argued** (arm T4, G7.md §3.1.1). `--quantization fp8`
+*plus* `--dit-layerwise-offload` at TP=2 × U=4 — both flags confirmed active in the server args — dies
+at 29.47 GiB allocated inside `fsdp_load.py:load_model_from_full_model_state_dict`, while the identical
+bf16 arm peaks at 11 428 MB. The quantized load path materialises parameters on device to attach weight
+scales, so layerwise offload only streams what the unquantized path leaves streamable. Do not retry
+this with a different offload flag combination; the failure is in the loader, not in residency.
+
+## Offline fp8 checkpoint at TP=2 — the one unexplored configuration that could beat 134.27 s
+
+**Not started.** 15.5 GB/card *and* fp8's 4.21 s/step, i.e. TP=2's memory headroom with no precision
+penalty and no per-step streaming. `quantization_utils.py:409` accepts `["float8_e4m3fn"]` as a format
+set, and `--transformer-weights-path` already serves an offline-quantized DiT (that is how NVFP4 loads),
+so the missing piece is an exporter alongside `quant.sh` — same walk over the two partitions, `torch.
+float8_e4m3fn` per-tensor or per-channel instead of the group-16 e2m1 packing, writing the same
+`_quantization_metadata` header shape the loader reads at `:131`. Two cautions carried over from the
+NVFP4 work: **AdaLN must stay bf16 in the file** (same two refusal sites), and the first render must be
+**watched**, because a wrong scale layout renders cleanly and silently at the right bitrate.
