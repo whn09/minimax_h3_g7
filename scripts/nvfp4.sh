@@ -94,6 +94,34 @@ fi
 stop
 fi
 
+if want N3; then
+echo "=== N3  ref2va + nvfp4 + sage + text_encoder offload   (N1 OOMed by ~1 GB)" | tee -a $R
+log=$L/serve_ref2va_768p_nvfp4off.log; rm -f $log
+# WHY THIS ARM EXISTS. N1 dies during load, not at runtime: rank 4 reports 30.59 GiB allocated of
+# 31.37 GiB and the *video VAE* is what fails to find its last 64 MB. NVFP4 is not the thing using
+# the memory -- the DiT's own 50 adaln_proj weights are, because minimax_h3.py:2081 requires them
+# resident in fp32 whenever curve AdaLN is on ("must stay fp32 with curve AdaLN"), no matter what
+# dtype the checkpoint stores them in. They are 40% of the DiT's weights, so fp32 adaln is the
+# floor under every arm on this card, quantized or not. ref2va is the arm that crosses the line
+# because its server also holds the reference-image encoder at short edge 2048.
+#
+# --layerwise-offload-components text_encoder is the g7e recipe's own answer and it is a memory
+# move, not a precision move: the text encoder streams layer by layer from host RAM instead of
+# sitting resident. IT DOES COST A LITTLE LATENCY, once per request rather than once per step, so
+# THIS NUMBER IS NOT STRICTLY MATCHED against the 134.29 s sage arm -- it is a lower bound on what
+# NVFP4 saves, with an offload penalty folded in. Say so when quoting it.
+QUANT= GPUS=8 TP=4 ULYSSES=2 LOGTAG=nvfp4off \
+  setsid nohup bash $V/sglang_ref2va_arm.sh serve 768 \
+    --transformer-weights-path $V/nvfp4_ref2va.safetensors \
+    --layerwise-offload-components text_encoder "${SAGE[@]}" \
+    > $L/launch_nvfp4_c.log 2>&1 < /dev/null &
+sleep 15
+if up $log && readback $log; then
+  python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=nvfp4off 768:25:121 2>&1 | tee -a $R
+fi
+stop
+fi
+
 if want N2; then
 echo "=== N2  t2va@wide + nvfp4 + sage  (vs sage 85.64 s, fp8+sdpa 105.4 s)" | tee -a $R
 log=$L/serve_base_768p_nvfp4.log; rm -f $log
