@@ -15,6 +15,8 @@ from and where their history still is.
 | `scripts/g7_sweep.sh` | the topology/precision sweep: what fits on 32 GB and what it costs. |
 | `scripts/sage.sh` | SageAttention 2 arms. **1.23× t2va / 1.32× ref2va** at slightly *lower* peak memory. |
 | `scripts/quant.sh` | offline NVFP4 conversion of the two DiT partitions. Pure CPU, ~10 min each. |
+| `scripts/fp8_quantize_transformer.py` | offline **fp8** conversion. The qkv reorder in it is load-bearing — read its header. |
+| `scripts/fp8off.sh` | the offline-fp8 arms. **The fastest configuration on this box**, and exact math. |
 | `scripts/nvfp4.sh` | NVFP4 weights **stacked on sage**. Weight quantization alone is a regression at 768p. |
 | `scripts/sync.sh` | push the scripts to the pod. Also the one place the cross-repo dependency is written down. |
 
@@ -24,10 +26,16 @@ from and where their history still is.
 65.65 GiB bf16 checkpoint on the cards and casts there, so pure Ulysses (which replicates the DiT on
 every card) cannot load at all. **`--dit-layerwise-offload` does not rescue it either** — it makes
 *bf16* load at TP=2 (11.4 GB peak, G7.md §3.1.1) but fp8 still OOMs at 29.47 GiB in the loader, because
-the quantized path materialises parameters on device to attach weight scales. Every arm here is
-therefore `TP=4 × ULYSSES=2` — pinned by the loader, not by the collectives — and that constraint
-is also why the g7e project's numbers are not directly comparable to ours — that machine has 96 GB
-cards and every arm of theirs is TP=1.
+the quantized path materialises parameters on device to attach weight scales. So every *online*-fp8 arm
+here is `TP=4 × ULYSSES=2` — pinned by the loader, not by the collectives — and that constraint is also
+why the g7e project's numbers are not directly comparable to ours: that machine has 96 GB cards and
+every arm of theirs is TP=1.
+
+**The way out is an offline fp8 checkpoint, and it is the fastest thing on this box.** Pre-quantize the
+DiT with `scripts/fp8_quantize_transformer.py` and there is no cast to land, so `TP=2 × ULYSSES=4`
+loads and runs **1.12–1.15× faster than the online-fp8 TP=4 floor at ~40 % of the peak memory, with no
+approximation** — 119.43 s ref2va / 74.65 s t2va for a 5 s 768p clip at 25 steps, or 56.64 s / 38.66 s
+with Cache-DiT stacked on. G7.md §3.1.2.
 
 ## This repo is not self-contained, on purpose
 

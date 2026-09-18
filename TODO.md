@@ -86,13 +86,16 @@ bf16 arm peaks at 11 428 MB. The quantized load path materialises parameters on 
 scales, so layerwise offload only streams what the unquantized path leaves streamable. Do not retry
 this with a different offload flag combination; the failure is in the loader, not in residency.
 
-## Offline fp8 checkpoint at TP=2 — the one unexplored configuration that could beat 134.27 s
+## Offline fp8 checkpoint at TP=2 — **DONE, and it is the new floor.** Not parked.
 
-**Not started.** 15.5 GB/card *and* fp8's 4.21 s/step, i.e. TP=2's memory headroom with no precision
-penalty and no per-step streaming. `quantization_utils.py:409` accepts `["float8_e4m3fn"]` as a format
-set, and `--transformer-weights-path` already serves an offline-quantized DiT (that is how NVFP4 loads),
-so the missing piece is an exporter alongside `quant.sh` — same walk over the two partitions, `torch.
-float8_e4m3fn` per-tensor or per-channel instead of the group-16 e2m1 packing, writing the same
-`_quantization_metadata` header shape the loader reads at `:131`. Two cautions carried over from the
-NVFP4 work: **AdaLN must stay bf16 in the file** (same two refusal sites), and the first render must be
-**watched**, because a wrong scale layout renders cleanly and silently at the right bitrate.
+Built and measured: `scripts/fp8_quantize_transformer.py` + `scripts/fp8off.sh`, results in
+**G7.md §3.1.2**. 119.43 s ref2va / 74.65 s t2va at TP=2 × U=4 (1.12× / 1.15× over the online-fp8 TP=4
+floor, exact math, ~11 GB peak), and 56.64 s / 38.66 s with Cache-DiT rdt=0.16 on top. Both files exist
+on the pod's hostPath: `fp8_{ref2va,fl2va}.safetensors`, 46 242 233 688 bytes each.
+
+Nothing here is left to do. The one thing to carry forward if the files ever have to be rebuilt:
+**declaring a layer `float8_e4m3fn` asserts the qkv rows are already native**, because
+`ComfyFp8Config.checkpoint_uses_native_qkv_layout = True` makes minimax_h3.py skip its own reorder —
+so the exporter must reorder, and it refuses to write unless it reordered exactly 52 and quantized
+exactly 208. This is the opposite of the NVFP4 contract above, where the config leaves that attribute
+`False` and the loader reorders.

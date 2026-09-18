@@ -26,6 +26,8 @@ POD=${POD:-h3-serve}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cp "$G"/scripts/*.sh "$tmp"/
+# *.py too: fp8_quantize_transformer.py is ours (unlike the nvfp4 one below, which is g7e's).
+cp "$G"/scripts/*.py "$tmp"/ 2>/dev/null || true
 cp "$H"/scripts/_env.sh "$H"/scripts/sglang_base_arm.sh "$H"/scripts/sglang_ref2va_arm.sh \
    "$H"/scripts/sglang_case.py "$tmp"/
 cp "$H"/case/*.txt "$tmp"/
