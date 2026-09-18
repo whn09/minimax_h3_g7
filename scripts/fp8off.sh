@@ -229,4 +229,32 @@ fi
 stop
 unset SGLANG_CACHE_DIT_ENABLED
 fi
+
+if want F6; then
+echo "=== F6  F3 WITHOUT sage   (the quality gate for sage, at the topology we actually ship)" | tee -a $R
+# "sage会带来精度损失吗?" -- yes, it quantizes the attention computation, so it is an approximation and
+# not a free win. Every other arm in this file has it on, which means none of them can answer the
+# question: they are all on the same side of it. F6 is F3 with the attention backend as the ONLY
+# change, so ref2va_offp8_tp2.mp4 and this render are a matched pair for watching, and the timing
+# difference is sage's speedup measured at TP=2 rather than inherited from the TP=4 sweep (1.32x).
+# No --attention-backend at all: the arm scripts' default is torch_sdpa, which is the unapproximated
+# attention path.
+# NOTE THIS IS THE ONE ARM WHERE OMITTING "${SAGE[@]}" IS DELIBERATE. Everywhere else its absence is
+# a bug -- readback() exists precisely to catch a silent fallback to sdpa, which reads as a 32% slower
+# "success". Here the readback would fail the arm for doing the right thing, so it is skipped and the
+# backend line is printed for the record instead.
+log=$L/serve_ref2va_768p_offp8tp2nosage.log; rm -f $log
+QUANT= GPUS=8 TP=2 ULYSSES=4 LOGTAG=offp8tp2nosage \
+  setsid nohup bash $V/sglang_ref2va_arm.sh serve 768 \
+    --transformer-weights-path $F \
+    --dit-layerwise-offload --layerwise-offload-components text_encoder \
+    --image-encoder-cpu-offload --vae-cpu-offload \
+    > $L/launch_offp8_g.log 2>&1 < /dev/null &
+sleep 15
+if up $log; then
+  grep -h "Using .* attention backend" $log | tail -1 | sed 's/^/  attention: /' | tee -a $R
+  python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=offp8tp2nosage 768:25:121 2>&1 | tee -a $R
+fi
+stop
+fi
 echo FP8OFF_DONE | tee -a $R

@@ -33,9 +33,10 @@ every arm of theirs is TP=1.
 
 **The way out is an offline fp8 checkpoint, and it is the fastest thing on this box.** Pre-quantize the
 DiT with `scripts/fp8_quantize_transformer.py` and there is no cast to land, so `TP=2 × ULYSSES=4`
-loads and runs **1.12–1.15× faster than the online-fp8 TP=4 floor at ~40 % of the peak memory, with no
-approximation** — 119.43 s ref2va / 74.65 s t2va for a 5 s 768p clip at 25 steps, or 56.64 s / 38.66 s
-with Cache-DiT stacked on. G7.md §3.1.2.
+loads and runs **1.12–1.15× faster than the online-fp8 TP=4 floor at ~40 % of the peak memory, and the
+gain adds no approximation the baseline did not already have** (sage and fp8 weights are in both) —
+119.43 s ref2va / 74.65 s t2va for a 5 s 768p clip at 25 steps, or 56.64 s / 38.66 s with Cache-DiT
+stacked on. G7.md §3.1.2.
 
 ## This repo is not self-contained, on purpose
 
