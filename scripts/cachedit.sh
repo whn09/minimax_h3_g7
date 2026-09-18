@@ -59,7 +59,7 @@ up() { local log=$1 i; for i in $(seq 1 40); do
   pgrep -f '[s]glang.*serve' >/dev/null || { echo "  SERVER GONE" | tee -a $R; tail -6 "$log" | cut -c1-260 | tee -a $R; return 1; }
   sleep 10; done; echo "  TIMEOUT" | tee -a $R; return 1; }
 stop() { pkill -f '[s]glang.*serve' >/dev/null 2>&1; sleep 12; }
-want() { case " ${ARMS:-C0 C1 C2 D0 D1 D2 T1 T2} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+want() { case " ${ARMS:-C0 C1 C3 C2 D0 D1 D2 T1 T2} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Both readbacks come out of the server's own log because both failure modes are silent. Sage falling
 # back to torch_sdpa reproduces the 105/177 s baseline; Cache-DiT not mounting reproduces the
@@ -78,7 +78,7 @@ cachecheck() { grep -hi "cache.dit\|cache_dit\|DBCache\|hybrid parallelism" "$1"
 stop
 
 # ---------------------------------------------------------------- ref2va (the arm that matters)
-if want C0 || want C1 || want C2; then
+if want C0 || want C1 || want C2 || want C3; then
 echo "=== ref2va  fp8 + sage,  SGLANG_CACHE_DIT_ENABLED=true   (lossless reference: 134.29 s)" | tee -a $R
 log=$L/serve_ref2va_768p_cd.log; rm -f $log
 # QUANT=fp8 IS NOT OPTIONAL AND IS NOT INHERITED. sglang_ref2va_arm.sh:58 defaults QUANT to EMPTY
@@ -89,7 +89,10 @@ QUANT=fp8 GPUS=8 TP=4 ULYSSES=2 LOGTAG=cd \
     > $L/launch_cd_ref.log 2>&1 < /dev/null &
 sleep 15
 if up $log && readback $log; then
-  for a in "C0 off cdoff" "C1 4:0.04:1 cd004" "C2 4:0.16:3 cd016"; do
+  # C3 exists because the first pass came back 1.07x at rdt=0.04 and 2.16x at rdt=0.16 -- the two
+  # ends of a 4x spread with nothing in between, so "how much does quality drop" had no middle to
+  # look at. 0.10 / mc=2 sits between them on both knobs.
+  for a in "C0 off cdoff" "C1 4:0.04:1 cd004" "C3 4:0.10:2 cd010" "C2 4:0.16:3 cd016"; do
     set -- $a; want $1 || continue
     echo "--- $1  cache=$2" | tee -a $R
     CACHE=$2 python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=$3 768:25:121 2>&1 | tee -a $R
@@ -137,6 +140,12 @@ fi
 # 10-15 % topology gain from halving TP. The question being answered is the user's literal one --
 # does TP=2 run at all -- not whether it is faster. If T2 renders, the number goes in the table
 # marked as a feasibility point, not as a candidate.
+# CACHE=off ON EVERY T ARM, AND IT IS NOT OPTIONAL. SGLANG_CACHE_DIT_ENABLED=true is exported at the
+# top of this file for the C/D arms, and a request that sends no cache fields inherits the ENV
+# DEFAULTS -- which are rdt=0.24 / mc=3, more aggressive than any C arm. The first T3 run did exactly
+# that and came back 61.21 s at 2.45 s/step, a number that is Cache-DiT at rdt=0.24 stacked on a
+# topology change and attributable to neither. `cache=off` sends enable_cache_dit=false, which is the
+# per-request kill switch and wins over the env.
 if want T1; then
 echo "=== T1  ref2va bf16 TP=2 x U=4, adaln-online + all offloads   (retry of G7.md 3.1)" | tee -a $R
 log=$L/serve_ref2va_768p_tp2.log; rm -f $log
@@ -147,7 +156,7 @@ QUANT= GPUS=8 TP=2 ULYSSES=4 LOGTAG=tp2 \
     > $L/launch_tp2_a.log 2>&1 < /dev/null &
 sleep 15
 if up $log && readback $log; then
-  python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2 768:25:121 2>&1 | tee -a $R
+  CACHE=off python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2 768:25:121 2>&1 | tee -a $R
 fi
 stop
 fi
@@ -163,7 +172,28 @@ QUANT= GPUS=8 TP=2 ULYSSES=4 LOGTAG=tp2off \
     > $L/launch_tp2_b.log 2>&1 < /dev/null &
 sleep 15
 if up $log && readback $log; then
-  python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2off 768:25:121 2>&1 | tee -a $R
+  CACHE=off python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2off 768:25:121 2>&1 | tee -a $R
+fi
+stop
+fi
+if want T3; then
+echo "=== T3  TP=2 x U=4, --dit-layerwise-offload WITHOUT adaln-online   (T2 died on their combination)" | tee -a $R
+# T2 did not answer the memory question -- it never got to it. It failed in the transformer LOAD with
+# "RuntimeError: No backend type associated with device type cpu", i.e. a collective issued on CPU
+# tensors with no gloo backend initialised. --minimax-h3-adaln-online streams the adaln weights and
+# --dit-layerwise-offload streams the block weights, and stacking two streaming loaders at TP=2 is
+# what breaks. T3 drops adaln-online and keeps only the layerwise offload, which is the combination
+# that still attacks resident weights. If it also dies here, the failure is layerwise-offload at
+# TP>1 rather than the pair, and TP=2 is closed for a software reason on top of the arithmetic one.
+log=$L/serve_ref2va_768p_tp2lw.log; rm -f $log
+QUANT= GPUS=8 TP=2 ULYSSES=4 LOGTAG=tp2lw \
+  setsid nohup bash $V/sglang_ref2va_arm.sh serve 768 \
+    --dit-layerwise-offload --layerwise-offload-components text_encoder \
+    --image-encoder-cpu-offload --vae-cpu-offload "${SAGE[@]}" \
+    > $L/launch_tp2_c.log 2>&1 < /dev/null &
+sleep 15
+if up $log && readback $log; then
+  CACHE=off python $V/sglang_case.py case=$V/case_ir.txt task=ref2va tag=tp2lw 768:25:121 2>&1 | tee -a $R
 fi
 stop
 fi

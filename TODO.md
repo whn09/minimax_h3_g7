@@ -64,9 +64,15 @@ different shard-extraction path from the bf16 and online-fp8 arms that work.
   missing, check the **kube context** before concluding the disk was recycled — see README, "Access".
   Rebuilding them is `quant.sh`, ~2 min CPU per partition, once the snapshot is on disk.
 
-## TP=2 — measured, and the blocker is arithmetic, not a flag
+## TP=2 — it runs, it is 7.5 % slower, and it is a memory lever
 
-See G7.md §3.1 for the arms. Short form: **weights are the
+**Answered, not parked** — see G7.md **§3.1.1**. `--dit-layerwise-offload` at TP=2 × U=4 (bf16, *no*
+`--minimax-h3-adaln-online`; the two streaming loaders are incompatible) renders ref2va in
+**144.38 s at 11 428 MB peak**, against fp8 TP=4 × U=2's 134.27 s at 27 690 MB. So it is not a speed
+option, but it is the configuration with 20 GB of headroom per card, which is the one to reach for if
+a longer clip or a larger reference image ever runs out of room at TP=4.
+
+What remains open is only the *fast* low-TP route. Short form of why: **weights are the
 problem and Ulysses cannot help, because Ulysses does not shard weights — only TP does.** Activation
 residency is ~11 GiB per card at both TP=4 × U=2 and TP=2 × U=4, because the two shardings multiply
 to the same 1/8, so halving TP buys nothing on the activation side and costs 15.9 GB/card of weights.
