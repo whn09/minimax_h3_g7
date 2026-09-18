@@ -1,0 +1,6 @@
+out/
+pull/
+samples/
+*.mp4
+*.safetensors
+__pycache__/
