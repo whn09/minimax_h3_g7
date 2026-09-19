@@ -21,7 +21,27 @@ from and where their history still is.
 | `scripts/nvfp4_comfy_layout.py` | rewrites an NVFP4 checkpoint into the layout the H3 loader *asserts*. Read its header: it is the diagnosis. |
 | `scripts/nvfp4c.sh` | the fixed NVFP4 arms. **The fastest configuration on this box**, at TP=1 × U=8. |
 | `scripts/offload.sh` | what the three CPU-offload flags cost, ablated one at a time. Answer: 1.37 s, all of it `--vae-cpu-offload`. |
-| `scripts/sync.sh` | push the scripts to the pod. Also the one place the cross-repo dependency is written down. |
+| `scripts/sync.sh` | push `scripts/` and `case/` to the pod, flat, into `/data/h3`. Also warns if a duplicated file has drifted from its twin in the other repos. |
+
+### The drivers the Quick Start calls
+
+None of the `*.sh` arms above start a server by themselves — they all launch one of these, which is
+what carries the topology, offload and precision flags onto the command line:
+
+| file | what it is |
+|---|---|
+| `scripts/sglang_ref2va_arm.sh` | the **ref2va** server, port 30012. Defaults to **bf16** (`QUANT=${QUANT-}`) and `TP=2`. |
+| `scripts/sglang_base_arm.sh` | the **t2va/fl2va** server, port 30011. Defaults to **`QUANT=fp8`** and `TP=1` — *opposite* to the above, on both axes. |
+| `scripts/sglang_case.py` | the request driver: builds the `POST /v1/videos` body, polls to completion, prints the timing line. |
+| `scripts/_env.sh` | `CUDA_HOME` discovery, NCCL settings, the ffmpeg gate. Sourced by both arm scripts. |
+| `case/case_ir.txt`, `case/case_t2va_v2.txt` | the prompts every arm in this repo names. |
+| `scripts/nvfp4_quantize_transformer.py` | g7e's quantizer, vendored verbatim — `quant.sh` explains why it is not rewritten. |
+
+**These are duplicated from `../minimax_h3_h100` and `../../Trn2/minimax_h3_g7e` on purpose**, so that
+a fresh clone of *this* repo can run everything the Quick Start documents. They used to be fetched
+from those checkouts at sync time, which meant the commands below referred to files that were nowhere
+in the project. `scripts/sync.sh` warns if a twin has drifted but never auto-copies — the H100 route's
+copy is allowed to diverge, since it is a different card with different memory maths.
 
 ## Quick start: run the fastest configuration
 
@@ -44,23 +64,31 @@ recycled. `kubectl config current-context` first, every session. Everything belo
 pod, in `/data/h3` (the hostPath mount — never write renders to the pod's own layer, kubelet evicts for
 `ephemeral-storage`).
 
-### 1. Preflight — three things must be true
+### 1. Preflight — four things must be true
 
 ```bash
-# a) both converted checkpoints exist, 37 475 504 096 bytes each
+# a) the drivers and prompts are on the pod. They are all in this repo (scripts/ and case/), but they
+#    only reach /data/h3 via scripts/sync.sh, and sync lands them FLAT -- case/case_ir.txt becomes
+#    /data/h3/case_ir.txt. If this list is short, sync before anything else.
+ls -l /data/h3/sglang_ref2va_arm.sh /data/h3/sglang_base_arm.sh /data/h3/sglang_case.py \
+      /data/h3/_env.sh /data/h3/case_ir.txt /data/h3/case_t2va_v2.txt
+
+# b) both converted checkpoints exist, 37 475 504 096 bytes each
 ls -l /data/h3/nvfp4c_ref2va.safetensors /data/h3/nvfp4c_fl2va.safetensors
 
-# b) sage is installed IN THIS CONTAINER (run from anywhere except /sgl-workspace/SageAttention,
+# c) sage is installed IN THIS CONTAINER (run from anywhere except /sgl-workspace/SageAttention,
 #    or the compiled extension shadows itself and a working build reads as a failure)
 cd /tmp && python -c 'import sageattention; print(sageattention.__file__)'
 
-# c) 8 GPUs, idle
+# d) 8 GPUs, idle
 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
 ```
 
-If **(a)** is missing, rebuild: `cd /data/h3 && ARMS="C CB" bash nvfp4c.sh` (~3 min CPU per partition,
-needs the source `nvfp4_{ref2va,fl2va}.safetensors` from `quant.sh`). It refuses to write a file it
-could not verify, so a zero exit is the gate. If **(b)** is missing, you end up measuring the sdpa
+If **(a)** is short, run `bash scripts/sync.sh` from the checkout, not from the pod — it pushes over
+two hops (`scp` to the jump host, `kubectl cp` in) because the GPU nodes cannot be SSH'd.
+If **(b)** is missing, rebuild: `cd /data/h3 && ARMS="C CB" bash nvfp4c.sh` (~3 min CPU per partition,
+needs the source `nvfp4_{ref2va,fl2va}.safetensors` from `quant.sh`, which needs the HF snapshot). It
+refuses to write a file it could not verify, so a zero exit is the gate. If **(c)** is missing, you end up measuring the sdpa
 configuration and not this one — sage is worth 1.32–1.37× on its own, more than the whole topology
 change — which is why step 3 reads the backend back out of the log rather than trusting the flag. It
 must be built from source at `d1a57a5` with `TORCH_CUDA_ARCH_LIST=12.0` (~4 min at `MAX_JOBS=32`), and
@@ -414,22 +442,27 @@ are prompt length, not the knob in the column you are reading.
    directly while removing the PCIe all-reduces that cost time. There is ~20 GB free per card at the
    floor, which is the headroom for a longer clip or a bigger reference image.
 
-## This repo is not self-contained, on purpose
+## What is duplicated from the other two repos, and what still is not
 
-The serving drivers are **shared with the H100 route and live in the other repo**:
+This repo is self-contained for everything the Quick Start and the arm scripts do. Six files are
+**copies**, listed under "The drivers the Quick Start calls" above:
 
-    ../minimax_h3_h100/scripts/_env.sh                 CUDA_HOME discovery, NCCL, ffmpeg gate
-    ../minimax_h3_h100/scripts/sglang_base_arm.sh       the t2va/fl2va server
-    ../minimax_h3_h100/scripts/sglang_ref2va_arm.sh     the ref2va server
-    ../minimax_h3_h100/scripts/sglang_case.py           the request driver
-    ../minimax_h3_h100/case/                            the customer's prompts
+    scripts/_env.sh  sglang_base_arm.sh  sglang_ref2va_arm.sh  sglang_case.py   <- ../minimax_h3_h100
+    case/case_ir.txt  case/case_t2va_v2.txt                                     <- ../minimax_h3_h100/case
+    scripts/nvfp4_quantize_transformer.py                                       <- ../../Trn2/minimax_h3_g7e
 
-They are shared rather than copied because they are genuinely the same code driving two machines,
-and a copy would drift silently — the arms scripts already carry the g7 reasoning in their comments
-(`sglang_base_arm.sh:56-61` is about this card's 32 GB). The cost is that `scripts/sync.sh` needs
-both checkouts side by side. Prompt-engineering material (`PROMPT_IR.md`, `aud.sh`, `r2.sh`,
-`v2.sh`, `case_*_v2.txt`) also stays there: those experiments ran on this machine but they are about
-the prompt, not the hardware.
+They were shared rather than copied until the copies were made, on the theory that the same code
+driving two machines should exist once. The theory lost to a concrete failure: the Quick Start told a
+reader to run `bash /data/h3/sglang_ref2va_arm.sh`, and that file was in neither this repo nor
+anywhere the reader would look. **A runnable clone is worth more than a deduplicated one.**
+`scripts/sync.sh` diffs the twins and prints `DRIFT:` when they differ, but deliberately does not
+copy in either direction — the H100 route's versions are allowed to diverge, and the arm scripts
+already carry g7-specific reasoning in their comments (`sglang_base_arm.sh:56-61` is about this card's
+32 GB).
+
+Still **not** here, and not needed by anything in this repo: the prompt-engineering material
+(`PROMPT_IR.md`, `aud.sh`, `r2.sh`, `v2.sh`, the other `case_*.txt`). Those experiments ran on this
+machine but they are about the prompt, not the hardware, so they stay in `minimax_h3_h100`.
 
 ## Access
 
