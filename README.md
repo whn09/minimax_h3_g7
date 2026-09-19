@@ -20,6 +20,7 @@ from and where their history still is.
 | `scripts/nvfp4.sh` | the first NVFP4 arms. They render **noise** — kept as the failure signature; use `nvfp4c.sh`. |
 | `scripts/nvfp4_comfy_layout.py` | rewrites an NVFP4 checkpoint into the layout the H3 loader *asserts*. Read its header: it is the diagnosis. |
 | `scripts/nvfp4c.sh` | the fixed NVFP4 arms. **The fastest configuration on this box**, at TP=1 × U=8. |
+| `scripts/offload.sh` | what the three CPU-offload flags cost, ablated one at a time. Answer: 1.37 s, all of it `--vae-cpu-offload`. |
 | `scripts/sync.sh` | push the scripts to the pod. Also the one place the cross-repo dependency is written down. |
 
 ## Quick start: run the fastest configuration
@@ -79,11 +80,16 @@ QUANT= GPUS=8 TP=1 ULYSSES=8 LOGTAG=qs \
   setsid nohup bash /data/h3/sglang_ref2va_arm.sh serve 768 \
     --transformer-weights-path /data/h3/nvfp4c_ref2va.safetensors \
     --dit-layerwise-offload --layerwise-offload-components text_encoder \
-    --image-encoder-cpu-offload --vae-cpu-offload \
     --attention-backend sage_attn \
     --component-attention-backends text_encoder=torch_sdpa,audio_vae=torch_sdpa,video_vae=torch_sdpa \
     > /data/h3/sglang/logs/launch_qs.log 2>&1 < /dev/null &
 ```
+
+**There is no `--vae-cpu-offload` or `--image-encoder-cpu-offload` here, deliberately** — that is arm
+A2 of the ablation in `scripts/offload.sh`, and it is 1.37 s faster than the same run with both
+(46.32 s vs 47.69 s) while producing a **byte-identical mp4**, for +566 MB of peak. See "What the three
+offload flags cost" below. `--layerwise-offload-components text_encoder` stays: dropping it is worth
+0.04 s, costs 7.5 GB, and changes the output bytes.
 
 Three of those are easy to get wrong and all three fail quietly:
 
@@ -119,8 +125,14 @@ CACHE=4:0.16:3 python /data/h3/sglang_case.py \
 that reproduces 101 s, which is how you prove the cache is really doing the work. Expect:
 
 ```
-    qs ref2va 768p  25 steps  121 f ( 5.04 s): E2E ... inference   48.46 s   1.94 s/step  peak 11788 MB
+    qs ref2va 768p  25 steps  121 f ( 5.04 s): E2E ... inference   46.32 s   1.85 s/step  peak 12234 MB
 ```
+
+The server log also prints a nine-line stage breakdown per request, which is worth reading once:
+`TextEncoding 1.72 · VisualEncoding 0.57 · Denoising 40.22 · Decoding 3.20`. **The `s/step` above is
+`inference / steps`, not the DiT step time** — the real one is `40.22 / 25 = 1.61 s`. The ~5.5 s
+outside Denoising is fixed cost that Cache-DiT cannot touch, so it grows as a share of the total the
+faster the DiT gets: 6 % uncached, 12 % here.
 
 Then confirm it is video and not noise — this failure mode renders cleanly with no error in the log:
 
@@ -176,6 +188,67 @@ cd /data/h3 && ARMS=N9 setsid nohup bash nvfp4c.sh > sglang/logs/qs.log 2>&1 &  
 `ARMS` has no default worth relying on — unset, `want()` falls back to `C N4`, which reconverts the
 checkpoints and runs the TP=4 control instead of the fast arm. `N9` hard-codes `TP=1 ULYSSES=8`;
 `NVTP`/`NVUP` only reach `N7`.
+
+## What the three offload flags cost
+
+`scripts/offload.sh`, ref2va, everything else held at the floor (NVFP4 + `TP=1 × U=8` + sage +
+Cache-DiT rdt 0.16, 25 steps, 768p, 121 f, seed 42). `--dit-layerwise-offload` is kept in all four —
+at TP=1 it is not a speed knob but the only reason 37.5 GB of weights fit on a 32 GB card.
+
+| arm | offloads beyond `DiT⇄` | TextEnc | VisualEnc | Denoise | Decode | inference | peak/card | mp4 md5 |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| A0 | `te⇄` + img→cpu + vae→cpu | 1.750 | 0.585 | 40.304 | **3.832** | 47.69 s | 11 668 MB | `2b650b91…` |
+| A1 | `te⇄` + img→cpu | 1.864 | 0.571 | 40.220 | **3.197** | 46.47 s | 12 234 MB | `2b650b91…` |
+| **A2** | **`te⇄` only** | 1.715 | 0.573 | 40.216 | **3.195** | **46.32 s** | 12 234 MB | `2b650b91…` |
+| A3 † | none | 1.678 | 0.573 | 40.131 | 3.199 | 46.19 s | 19 750 MB | `4f358c1d…` |
+
+**The premise this arm was built on was wrong, and the numbers say so.** The 5.5–6.2 s spent outside
+Denoising is not offload overhead waiting to be reclaimed — it is real computation. Of it, exactly
+**0.64 s** was PCIe: dropping `--vae-cpu-offload` moves `Decode` from 3.832 to 3.197 and nothing else
+moves. The other two flags are worth 0.04 s and 0.01 s, i.e. nothing.
+
+- **`--vae-cpu-offload` is the only one worth dropping: 1.37 s for +566 MB.** The peak barely moves
+  because the offloaded video VAE (5.2 GB, fp16, 288 decoder weights — `host mmap: 4.50 GB`) has to be
+  on the card *during* decode either way; offload only decides whether it re-crosses PCIe first.
+- **`--image-encoder-cpu-offload` is a no-op on both axes.** A1 and A2 agree to 0.002 s on
+  VisualEncoding and are identical to the megabyte on peak.
+- **A0, A1 and A2 produce a byte-identical mp4** (`2b650b91…`, 716 461 B, 971 036 bps) across three
+  separate server processes. So this is not "lossless as far as I can tell" — it is the same file, and
+  it also establishes that the pipeline is deterministic at fixed config.
+- **† A3 changes the output.** Dropping `--layerwise-offload-components text_encoder` gives a different
+  mp4 (`4f358c1d…`, 717 745 B) for 0.04 s and +7.5 GB. Since A0–A2 prove determinism, the flag is the
+  cause, not run-to-run noise; *why* a streamed text encoder is bit-exact and a resident one is not, is
+  unexplained. **Keep the flag.** A3's 46.19 s is also within the ±0.15 s spread of A2 anyway.
+- **It did not OOM.** The pessimistic expectation was that dropping all three would not fit; at
+  19 750 of 31 373 MB it fits with 11.6 GB spare. What stops this being useful is that there is nothing
+  to buy with the memory, not that the memory is unavailable.
+
+The remaining 5.5 s is therefore a genuine floor for this pipeline shape: ~1.7 s of Qwen3-VL over a
+3 337-character prompt, ~0.6 s of reference tower, ~3.2 s of 8-way tiled VAE decode. Note this was
+measured on ref2va only; t2va has no reference tower, so the `img→cpu` row is a no-op there by
+construction and the `vae→cpu` saving is expected but unmeasured.
+
+### Why the VAE decode cannot simply be spread wider
+
+It is already spread across all eight cards. `configs/models/vaes/minimax_h3_video.py` sets
+`use_parallel_tiling = True` and `use_parallel_decode` is `True` from `VAEConfig`, so the 3.2 s is the
+8-way number, in `tiled` mode — whole tiles distributed across ranks, leaving the released
+overlapping-tile recipe intact. The obvious alternative, sharding the frame spatially, is refused by
+the model on purpose:
+
+```python
+parallel_decode_mode: str = "tiled"     # VAEConfig's default is "auto"
+def resolved_parallel_decode_mode(self) -> str:
+    if self.parallel_decode_mode in ("spatial", "spatial_shard"):
+        raise ValueError("MiniMax H3 rejects spatial-shard VAE decode because it failed "
+                         "the released quality contract; use tiled")
+```
+
+So `--video-vae.parallel-decode-mode spatial_shard` does not run slowly — it raises in `post_init()`
+and the server never starts. What is left is the tile geometry
+(`--video-vae.tile-sample-min-height/width/num-frames`, `--video-vae.tile-sample-stride-*`, and the
+arch's `vae_tile_size=256` / `vae_tile_overlap_min=64`): larger tiles or less overlap would cut
+duplicated work, but that is the same quality contract `spatial_shard` was rejected for touching.
 
 `N8`/`N9` each run **two** requests — `cache=off` first as the in-process control, then rdt 0.16 — so
 they take about 150 s of inference rather than 50. Results append to
@@ -249,6 +322,10 @@ Legend for the axes:
 
 | arm | precision | TP × U | attention | Cache-DiT | memory levers | ≈ | steps | inference | s/step | peak/card |
 |---|---|---|---|---|---|---|---:|---:|---:|---:|
+| A3 † | NVFP4 off | 1 × 8 | sage | 0.16 / mc 3 | DiT⇄ only | WAC | 25 | 46.19 s | 1.85 | 19 750 MB |
+| **A2** | **NVFP4 off** | **1 × 8** | sage | **0.16 / mc 3** | **DiT⇄ te⇄** | WAC | 25 | **46.32 s** | **1.85** | 12 234 MB |
+| A1 | NVFP4 off | 1 × 8 | sage | 0.16 / mc 3 | DiT⇄ te⇄ img→cpu | WAC | 25 | 46.47 s | 1.86 | 12 234 MB |
+| A0 | NVFP4 off | 1 × 8 | sage | 0.16 / mc 3 | DiT⇄ te⇄ img/vae→cpu | WAC | 25 | 47.69 s | 1.91 | 11 668 MB |
 | **N8** | **NVFP4 off** | **1 × 8** | sage | **0.16 / mc 3** | DiT⇄ te⇄ img/vae→cpu | WAC | 25 | **48.46 s** | **1.94** | 11 788 MB |
 | F5 | fp8 off | 2 × 4 | sage | 0.16 / mc 3 | DiT⇄ te⇄ img/vae→cpu | WAC | 25 | 56.64 s | 2.27 | 11 828 MB |
 | C2 | fp8 on | 4 × 2 | sage | 0.16 / mc 3 | — | WAC | 25 | 62.30 s | 2.49 | 28 110 MB |
@@ -316,7 +393,7 @@ are prompt length, not the knob in the column you are reading.
 | `bf16` + `adaln` + all offloads, TP=2 × U=4 (T1) | forward OOM, 30.55 of 31.37 GiB. |
 | T1 + `DiT⇄` (T2) | **software wall**, not memory: `RuntimeError: No backend type associated with device type cpu`. Two streaming loaders cannot be stacked. |
 | `bf16`, TP=1 × U=8 | load OOM. Ulysses does not shard weights. |
-| `NVFP4 off`, TP=4 × U=2, no offload | load OOM, 30.59 of 31.37 GiB. |
+| `NVFP4 off`, TP=4 × U=2, without `te⇄` | load OOM, 30.59 of 31.37 GiB — the **video VAE** short of its last 64 MB, since it loads last. Fixed by `--layerwise-offload-components text_encoder`, *not* by `--dit-layerwise-offload`: arm N4 is this topology with **no offload flag at all** and it runs (125.16 s, 28 142 MB) with 3.2 GB to spare. The two differ only in load-time transients, so treat 28 GB peak at TP=4 as the edge of the envelope rather than a safe margin. |
 | `fp8 on` + `adaln` | `--minimax-h3-adaln-online` is bf16-only. |
 | `--attention-backend fa2` | fails on sm_120. |
 | `--attention-backend video_sparse_attn_h3` | hard-gated off sm_120, and it does not override `forward_varlen`, which H3's packed-varlen DiT requires. |
