@@ -1,0 +1,26 @@
+# A SYNTHETIC t2va case, written only to make the commands in README.md runnable from a fresh clone.
+# The measured numbers came from a different prompt, which is not in this repo. See demo_ref2va.txt's
+# header for the format and for what about a prompt the timings actually depend on.
+#
+# t2va TAKES THREE SECTIONS, not ref2va's six (VIDEO_PROMPT_WRITING_GUIDE sec. 2.2):
+#     integrated_multimodal_description / overall_soundscape / non_diegetic_music
+# blank-line separated. The audio branch is conditioned by the same text as the video branch, so
+# omitting the last two fields does not mean "no audio" -- it means the model invents both.
+#
+# THREE THINGS IN THE LINE BELOW ARE THERE BECAUSE OMITTING THEM PRODUCED A VISIBLE DEFECT:
+#   1. SPOKEN LINES GO INSIDE <d> WITH A LANGUAGE TAG and the speaker carries a stable ID (sec. 4.4).
+#      Asking for speech without supplying the words gets prosodically-plausible babble. Delivery,
+#      timbre and speaking rate go OUTSIDE the tag; only the language tag and the verbatim line go in.
+#   2. NUMBERS AND LATIN LETTERS IN CHINESE DIALOGUE ARE SPELLED OUT IN CHARACTERS. A digit in the
+#      dialogue is read by whatever the text frontend guesses -- we lost a take to `2x` coming out as
+#      `rx`. Writing 十八 rather than 18 fixed it, and the fix is only in the dialogue: on-screen text
+#      stays verbatim in double quotes and is never rewritten.
+#   3. SAY WHAT IS IN FRAME, not the shot size. `a static medium shot` on its own rendered as a medium
+#      close-up every time. Which body line the frame cuts at, and what else is visible, is a strong
+#      instruction where a shot-size noun is a weak one.
+#
+# The `@wide` label after the task lets one file hold several arms of the same task -- `task=t2va`
+# alone renders all of them, `label=wide` picks this one. `\n` is decoded to a newline by
+# sglang_case.py; t2va lines carry no trailing image and get `conditions: []`.
+
+t2va@wide: integrated_multimodal_description: [Shot 1] Live-action, cinematic, a static medium shot frames a barista in his late twenties in a charcoal t-shirt and a dark brown canvas apron standing behind the pale oak counter of a small café, his body turned three-quarters toward the camera. The camera is about two and a half metres away, so the frame cuts at his waist, his whole head and both shoulders sit well inside the frame with space above his hair, and the full width of the counter is visible in front of him with a brushed-steel espresso machine at the left edge. A handwritten chalkboard sign reading "TODAY: YUNNAN" leans against the wall behind his right shoulder, small in the frame and legible in full, and both of his hands rest empty on the counter top. The camera holds a static shot as he lifts his right hand and gestures toward the sign with an open palm, never touching it, then turns his face toward the lens, and the barista with a clear, warm mid-range voice and a steady speaking rate (S1) says: <d>[Chinese] 今天的豆子是云南的，中度烘焙，一杯十八块。</d> His lips move in precise synchronization with each syllable, his eyebrows lift slightly on the final word, and he lowers his hand back to the counter as he finishes speaking. Nothing is poured and the chalkboard sign is unchanged from the first frame to the last.\n\noverall_soundscape: Quiet café room tone continues throughout, with the faint hiss of an idle espresso machine and the soft rustle of canvas as he moves his arm.\n\nnon_diegetic_music: N/A

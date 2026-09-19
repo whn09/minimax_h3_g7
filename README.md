@@ -34,14 +34,33 @@ what carries the topology, offload and precision flags onto the command line:
 | `scripts/sglang_base_arm.sh` | the **t2va/fl2va** server, port 30011. Defaults to **`QUANT=fp8`** and `TP=1` — *opposite* to the above, on both axes. |
 | `scripts/sglang_case.py` | the request driver: builds the `POST /v1/videos` body, polls to completion, prints the timing line. |
 | `scripts/_env.sh` | `CUDA_HOME` discovery, NCCL settings, the ffmpeg gate. Sourced by both arm scripts. |
-| `case/case_ir.txt`, `case/case_t2va_v2.txt` | the prompts every arm in this repo names. |
+| `case/demo_ref2va.txt`, `case/demo_t2va.txt` | **synthetic** prompts, in the official IR format, so the Quick Start runs from a fresh clone. See below — they are not what the matrix was measured on. |
 | `scripts/nvfp4_quantize_transformer.py` | g7e's quantizer, vendored verbatim — `quant.sh` explains why it is not rewritten. |
 
-**These are duplicated from `../minimax_h3_h100` and `../../Trn2/minimax_h3_g7e` on purpose**, so that
-a fresh clone of *this* repo can run everything the Quick Start documents. They used to be fetched
+**The scripts are duplicated from `../minimax_h3_h100` and `../../Trn2/minimax_h3_g7e` on purpose**, so
+that a fresh clone of *this* repo can run everything the Quick Start documents. They used to be fetched
 from those checkouts at sync time, which meant the commands below referred to files that were nowhere
 in the project. `scripts/sync.sh` warns if a twin has drifted but never auto-copies — the H100 route's
 copy is allowed to diverge, since it is a different card with different memory maths.
+
+### The prompts are not in this repo, and the demo ones are not the measured ones
+
+Every number in the matrix below was produced by two prompt files, `case_ir.txt` and
+`case_t2va_v2.txt`, plus one reference image. **Those are customer material and are deliberately
+absent** — `.gitignore` has `case/case_*.txt` and `ref/` so they cannot be committed by accident, and
+the arm scripts name them as *inputs you supply* at `/data/h3`. What is committed is a synthetic pair
+in the same format and roughly the same length, which is what the Quick Start uses:
+
+| committed, synthetic | the arm scripts expect | what differs |
+|---|---|---|
+| `case/demo_ref2va.txt` (3 546-char prompt, `demo_ref.jpg`) | `/data/h3/case_ir.txt` (3 337-char prompt, one reference image) | scene content only. Same six IR sections, one static shot, no dialogue |
+| `case/demo_t2va.txt` (`t2va@wide`, 1 505 chars) | `/data/h3/case_t2va_v2.txt` (`t2va@wide`, ~1 410 chars) | scene content and the spoken line. Same three sections, same `<d>[Chinese]` shape |
+
+So the Quick Start's timings should land within a few tenths of the recorded ones and its *renders*
+will show a different scene. Prompt length is the only part of a prompt that moves latency here, and
+only through `MiniMaxH3TextEncodingStage` — measured at 1.6 % for 54× the text. To reproduce the
+recorded numbers exactly, drop your own files in as `case/case_ir.txt` and `case/case_t2va_v2.txt`
+(gitignored, still synced) and the reference image in `ref/`.
 
 ## Quick start: run the fastest configuration
 
@@ -67,11 +86,13 @@ pod, in `/data/h3` (the hostPath mount — never write renders to the pod's own 
 ### 1. Preflight — four things must be true
 
 ```bash
-# a) the drivers and prompts are on the pod. They are all in this repo (scripts/ and case/), but they
-#    only reach /data/h3 via scripts/sync.sh, and sync lands them FLAT -- case/case_ir.txt becomes
-#    /data/h3/case_ir.txt. If this list is short, sync before anything else.
+# a) the drivers and prompts are on the pod. The drivers and the demo prompts are all in this repo
+#    (scripts/ and case/), but they only reach /data/h3 via scripts/sync.sh, and sync lands them FLAT
+#    -- case/demo_ref2va.txt becomes /data/h3/demo_ref2va.txt. If this list is short, sync first.
 ls -l /data/h3/sglang_ref2va_arm.sh /data/h3/sglang_base_arm.sh /data/h3/sglang_case.py \
-      /data/h3/_env.sh /data/h3/case_ir.txt /data/h3/case_t2va_v2.txt
+      /data/h3/_env.sh /data/h3/demo_ref2va.txt /data/h3/demo_t2va.txt
+#    ref2va also needs its reference image, which is NOT in the repo -- supply one:
+ls -l /data/h3/ref/demo_ref.jpg
 
 # b) both converted checkpoints exist, 37 475 504 096 bytes each
 ls -l /data/h3/nvfp4c_ref2va.safetensors /data/h3/nvfp4c_fl2va.safetensors
@@ -146,11 +167,16 @@ backend line does not say `sage_attn`, stop and fix step 1(b) rather than spendi
 
 ```bash
 CACHE=4:0.16:3 python /data/h3/sglang_case.py \
-  case=/data/h3/case_ir.txt task=ref2va tag=qs 768:25:121
+  case=/data/h3/demo_ref2va.txt task=ref2va tag=qs 768:25:121
 ```
 
+(The recorded arms all say `case=/data/h3/case_ir.txt` instead. That file is not in the repo — see
+*"The prompts are not in this repo"* above. `demo_ref2va.txt` is the synthetic stand-in and needs
+`/data/h3/ref/demo_ref.jpg` to exist.)
+
 `CACHE=warmup:rdt:mc` — `4:0.16:3` is the fast setting; `CACHE=off` in the same process is the control
-that reproduces 101 s, which is how you prove the cache is really doing the work. Expect:
+that reproduces 101 s, which is how you prove the cache is really doing the work. Expect this, the
+recorded run (a ~200-character-longer demo prompt costs ~0.1 s more in `TextEncoding`, nothing else):
 
 ```
     qs ref2va 768p  25 steps  121 f ( 5.04 s): E2E ... inference   46.32 s   1.85 s/step  peak 12234 MB
@@ -172,8 +198,10 @@ ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate -of csv=p=0 <
 
 ### 5. t2va, if you want both
 
-Different server (port 30011), different script, different prompt file, and `label=wide` matters —
-`case_t2va_v2.txt` holds two arms of the same task and `task=t2va` alone renders both.
+Different server (port 30011), different script, different prompt file, and `label=wide` matters — a
+case file can hold several arms of the same task and `task=t2va` alone renders all of them. (The
+recorded arms use `case_t2va_v2.txt`, which holds `@pose` and `@wide`; `demo_t2va.txt` holds only
+`@wide`, so the flag is redundant there but kept so the command matches the scripts.)
 
 ```bash
 pkill -f '[s]glang.*serve'; sleep 12
@@ -189,7 +217,7 @@ QUANT= GPUS=8 TP=1 ULYSSES=8 LOGTAG=qs \
 
 # readiness log is serve_base_768p_qs.log, then:
 CACHE=4:0.16:3 python /data/h3/sglang_case.py \
-  case=/data/h3/case_t2va_v2.txt task=t2va label=wide tag=qs 768:25:121
+  case=/data/h3/demo_t2va.txt task=t2va label=wide tag=qs 768:25:121
 ```
 
 `nvfp4c_fl2va`, not `nvfp4c_t2va`: `MINIMAX_H3_TASK_PARTITIONS` maps t2va → fl2va, so the base server
@@ -444,11 +472,11 @@ are prompt length, not the knob in the column you are reading.
 
 ## What is duplicated from the other two repos, and what still is not
 
-This repo is self-contained for everything the Quick Start and the arm scripts do. Six files are
-**copies**, listed under "The drivers the Quick Start calls" above:
+This repo is self-contained for everything the Quick Start and the arm scripts do, **except the
+prompts and the reference image**. Five files are **copies**, listed under "The drivers the Quick Start
+calls" above:
 
     scripts/_env.sh  sglang_base_arm.sh  sglang_ref2va_arm.sh  sglang_case.py   <- ../minimax_h3_h100
-    case/case_ir.txt  case/case_t2va_v2.txt                                     <- ../minimax_h3_h100/case
     scripts/nvfp4_quantize_transformer.py                                       <- ../../Trn2/minimax_h3_g7e
 
 They were shared rather than copied until the copies were made, on the theory that the same code
@@ -460,9 +488,17 @@ copy in either direction — the H100 route's versions are allowed to diverge, a
 already carry g7-specific reasoning in their comments (`sglang_base_arm.sh:56-61` is about this card's
 32 GB).
 
-Still **not** here, and not needed by anything in this repo: the prompt-engineering material
-(`PROMPT_IR.md`, `aud.sh`, `r2.sh`, `v2.sh`, the other `case_*.txt`). Those experiments ran on this
-machine but they are about the prompt, not the hardware, so they stay in `minimax_h3_h100`.
+**The prompts are the one thing that is not copied and never will be.** `case_ir.txt` and
+`case_t2va_v2.txt` describe a customer's shot, so they are not in this repo at any commit; `case/`
+holds the synthetic `demo_*.txt` pair instead and `.gitignore` blocks `case/case_*.txt` and `ref/`.
+This is not a de-duplication argument, it is a disclosure one, and it beats runnability where the two
+conflict: the demo prompts keep the commands runnable and the timings within a few tenths, and they
+render a different scene. Anything in this repo that still *names* `case_ir.txt` is naming a file you
+supply.
+
+Also still **not** here, and not needed by anything in this repo: the prompt-engineering material
+(`PROMPT_IR.md`, `aud.sh`, `r2.sh`, `v2.sh`). Those experiments ran on this machine but they are about
+the prompt, not the hardware, so they stay in `minimax_h3_h100`.
 
 ## Access
 

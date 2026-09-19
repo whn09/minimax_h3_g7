@@ -31,8 +31,8 @@
 # ref2va/rir25 = 177.2 s inference, t2va/ir25 = 105.4 s.
 #
 # THE t2va ARM USES case_t2va_v2.txt's @wide LINE, NOT case_ir.txt's t2va LINE. Those are different
-# prompts and the difference is a defect: the case_ir.txt one is the arm whose "2x" came out of the
-# TTS as "rx" (PROMPT_IR.md:19), which @wide fixes. Timing stays comparable across the swap because
+# prompts and the difference is a defect: the case_ir.txt one is the arm whose dialogue had a digit
+# in it and came back mispronounced (PROMPT_IR.md:19), which @wide fixes. Timing stays comparable because
 # prompt length is not a latency knob here -- PROMPT_IR.md:271 measured a 3376-char prompt against a
 # 62-char one at 177.18 vs 174.43 s, i.e. 1.6% for 54x the text -- and 1036 -> 1466 chars is far
 # inside that. So the 105.4 s reference number still stands, and the mp4 this arm produces is one

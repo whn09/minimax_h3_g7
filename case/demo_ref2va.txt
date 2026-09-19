@@ -1,0 +1,36 @@
+# A SYNTHETIC ref2va case, written only to make the commands in README.md runnable from a fresh
+# clone. Every number in this repo's matrix was measured on a different prompt -- a customer's, which
+# is not here and will not be -- so treat this file as a shape, not as a reproduction.
+#
+# WHAT CARRIES OVER FROM THE REAL PROMPT, because it is what the timings depend on:
+#   * one static shot, 768p, 121 frames (5.04 s), seed 42;
+#   * ~3.5 k characters of prompt (the real one was 3 337), because MiniMaxH3TextEncodingStage runs
+#     Qwen3-VL over the whole string and its ~1.7 s is roughly linear in that length. A 200-character
+#     prompt makes the floor look better than it is;
+#   * one reference image, which VisualEncoding resizes to a 2048 short edge (~0.6 s);
+#   * no spoken dialogue, so the audio branch has nothing to synthesise. Adding <d> tags does not
+#     change the step count but does change what the DiT has to solve.
+#
+# THE FORMAT IS THE OFFICIAL ONE and it is documented even though the system that emits it is not:
+# SGLang feeds this text to Qwen3-VL verbatim (presentation.py:109, no chat template, no rewriter),
+# while MiniMax's own product first runs the input through H3-Context-IR, a hosted multi-stage
+# rewriter that the release explicitly excludes. So whatever you send IS the IR, and a one-sentence
+# prompt is an out-of-distribution input rather than a short one. ref2va takes SIX blank-line
+# separated sections (VIDEO_PROMPT_WRITING_GUIDE_ref_en.md sec. 1):
+#     subject_definitions / summary / retention_analysis / detailed_description /
+#     overall_soundscape / non_diegetic_music
+# with every asset labelled (`<Subject N>` for reusable content, `<Picture N>` for a frame anchor),
+# a bracketed task prefix on the summary, one of fully_preserved / partially_preserved /
+# attribute_transfer / weak_reference per label in retention_analysis, and 350-500 English words of
+# detailed_description. On-screen text stays in its source language inside double quotes; only
+# dialogue and on-screen text are ever non-English. The full derivation, including four rules whose
+# violation each matched one visible defect, is in minimax_h3_h100/PROMPT_IR.md.
+#
+# `\n` below is decoded to a real newline by sglang_case.py -- the file is one case per LINE and the
+# format needs blank lines, so the two cannot both be literal. The trailing token is the reference
+# image filename, resolved against refdir= (default /data/h3/ref). SUPPLY YOUR OWN demo_ref.jpg:
+# a single frame of the subject and scene you want preserved. ref2va means "keep this subject and
+# this scene", not "arrive at this frame" -- if your image is the END state of the action you are
+# asking for, you want task fl2va with an explicit frame_index instead.
+
+ref2va: subject_definitions:\n<Subject 1> is the barista in <Picture 1>, a man in his late twenties with short dark hair combed back, a plain charcoal crew-neck t-shirt, and a dark brown canvas apron whose single strap crosses his chest from his left shoulder.\n<Subject 2> is the café counter environment in <Picture 1>, featuring a pale oak counter top, a brushed-steel espresso machine with a steam wand angled down toward the drip tray, a short stack of white saucers beside it, and a wall of small white subway tiles behind the counter with a narrow shelf of clear glass jars.\n\nsummary:\n[reference generation] The target video shows <Subject 1> standing at the counter of <Subject 2> and pouring steamed milk from a steel pitcher into a white cup of espresso in a single static medium shot, ending with a finished leaf pattern centred on the surface of the drink.\n\nretention_analysis:\n<Subject 1> (appears in [Shot 1]): fully_preserved - his facial identity, short combed-back dark hair, charcoal crew-neck t-shirt and brown canvas apron with the single crossing strap are retained.\n<Subject 2> (appears in [Shot 1]): fully_preserved - the pale oak counter top, the brushed-steel espresso machine and its angled steam wand, the stack of white saucers, and the white subway-tiled wall with its shelf of glass jars are retained.\n\ndetailed_description:\nThe target video is live-action and cinematic, lit by soft diffuse daylight from a window outside the frame on the right, with a warm and slightly desaturated realistic colour palette.\n[Shot 1] A static medium shot frames <Subject 1> from the front and slightly above, cut at his waist by the lower edge of the frame, standing behind the pale oak counter of <Subject 2> with the espresso machine to his left. A white ceramic cup sits on the counter directly in front of him, already holding a shallow layer of espresso with an even hazelnut-coloured crema, and he holds a small steel milk pitcher in his right hand with his left hand steadying the saucer. The camera holds a static shot for the entire duration. He tilts the pitcher and begins a thin steady stream of steamed milk into the centre of the cup, and the white milk sinks below the crema so the surface stays uniformly brown and the level in the cup rises visibly. His forearm stays level and his wrist does the work, and the apron strap shifts against his shoulder as he leans in. He lowers the lip of the pitcher until it almost touches the drink and widens the stream, and a small round white dot appears at the far side of the surface. He begins moving the pitcher in short side-to-side motions while drawing it steadily back toward himself, and a row of nested white arcs lays down behind it, each one slightly wider than the last, forming the body of a leaf across the middle of the cup, with thin strands of steam drifting up through the daylight. He raises the pitcher, narrows the stream to a fine line, and draws it forward through the centre of the pattern in one continuous movement, cutting a clean white stem through the arcs. The pour stops, he lifts the pitcher clear of the cup and sets it down on the counter to his left, and the finished pattern sits centred and still on the surface of the drink. His lips stay closed throughout the shot and he does not speak, and he looks down at the cup with a small closed-lip smile.\n\noverall_soundscape:\nA quiet café room tone continues throughout, with the soft continuous sound of milk pouring into ceramic, the faint hiss of residual steam, the light rustle of the canvas apron as his arm moves, and a single soft metallic tap as he sets the pitcher down on the counter.\n\nnon_diegetic_music:\nN/A demo_ref.jpg

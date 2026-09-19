@@ -4,3 +4,8 @@ samples/
 *.mp4
 *.safetensors
 __pycache__/
+# Real prompts and reference images are customer material and are never committed. Only the synthetic
+# case/demo_*.txt stand-ins are tracked. scripts/sync.sh still ships whatever is in case/ and ref/ to
+# the pod, so putting the real case_ir.txt / case_t2va_v2.txt here works without risking a commit.
+case/case_*.txt
+ref/

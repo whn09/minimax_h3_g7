@@ -49,9 +49,8 @@ SEED = 42                                  # same seed as every other arm in thi
 FRAMES = 121                               # 5.04 s; see the docstring
 # -1 is "the last frame", not "one before the end": request_validation.py:215 maps -1 to
 # aligned_frame_count - 1, and :265 says the only accepted keyframe sets are [0], [-1] and [0, -1].
-# Default -1 because the whole point of the fl2va arm is that ref2va.jpg is the END state (the phrase
-# is already complete and she has already turned to camera), so pinning it as frame 0 would ask for
-# the opposite video.
+# Default -1 because the whole point of the fl2va arm is the case where the reference image is the END
+# state of the action being asked for, so pinning it as frame 0 would ask for the opposite video.
 FL2VA_FRAME_INDEX = int(os.environ.get("FL2VA_FRAME_INDEX") or "-1")
 # Both overridable by environment, because the p5/H100 route and the g7 route disagree about where
 # the big local disk is mounted: /opt/dlami/nvme on a DLAMI instance store, /data on the g7 pods

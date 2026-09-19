@@ -3,9 +3,9 @@
 #
 #   bash scripts/sync.sh
 #
-# THIS REPO IS SELF-CONTAINED. Everything the arms need is committed here: the two server scripts and
-# the request driver (`sglang_{base,ref2va}_arm.sh`, `sglang_case.py`, `_env.sh`), the prompts in
-# `case/`, and g7e's NVFP4 quantizer. It used to reach into ../minimax_h3_h100 for the first group and
+# THIS REPO IS SELF-CONTAINED, EXCEPT THE PROMPTS. Everything the arms need is committed here: the two
+# server scripts and the request driver (`sglang_{base,ref2va}_arm.sh`, `sglang_case.py`, `_env.sh`),
+# and g7e's NVFP4 quantizer. It used to reach into ../minimax_h3_h100 for the first group and
 # into ../../Trn2/minimax_h3_g7e for the last, on the theory that sharing beats copying. In practice
 # that made the documented commands unrunnable from a fresh clone of this repo -- you could read a
 # Quick Start that said `bash /data/h3/sglang_ref2va_arm.sh` and then not find that file anywhere in
@@ -25,7 +25,14 @@
 # to be: the pod's own writable layer is capped by ephemeral-storage and kubelet evicts the pod for
 # exceeding it, which is a 24 GB nvfp4 file's worth of easy mistake. The scripts expect the flat
 # layout (VDNROOT=/data/h3), not the repo's scripts/ subdirectory -- which is also why case/*.txt
-# lands beside them as /data/h3/case_ir.txt rather than in a case/ directory.
+# lands beside them as /data/h3/demo_ref2va.txt rather than in a case/ directory.
+#
+# THE PROMPTS ARE THE EXCEPTION AND IT IS DELIBERATE. `case_ir.txt` / `case_t2va_v2.txt` are a
+# customer's shot description, so they are not committed and `.gitignore` blocks them (`case/case_*.txt`
+# and `ref/`). Only the synthetic `case/demo_*.txt` pair is tracked. This script ships whatever it
+# finds in case/ and ref/, tracked or not, so the working copy is the right place to keep the real
+# files -- they reach the pod without ever reaching a commit. Every glob below is therefore allowed to
+# come up short: `cp` failing on an empty ref/ is not an error worth aborting a sync for.
 set -euo pipefail
 G=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 POD=${POD:-h3-serve}
@@ -50,7 +57,14 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cp "$G"/scripts/*.sh "$tmp"/
 cp "$G"/scripts/*.py "$tmp"/
-cp "$G"/case/*.txt "$tmp"/
+shopt -s nullglob
+cases=("$G"/case/*.txt)
+[ ${#cases[@]} -eq 0 ] || cp "${cases[@]}" "$tmp"/
+# ref/ keeps its directory because REFDIR=/data/h3/ref, not the flat root. Untracked by design: the
+# reference images are customer material like the prompts.
+refs=("$G"/ref/*)
+if [ ${#refs[@]} -ne 0 ]; then mkdir -p "$tmp"/ref && cp "${refs[@]}" "$tmp"/ref/; fi
+shopt -u nullglob
 
 tar czf "$tmp/sync.tgz" -C "$tmp" $(cd "$tmp" && ls | grep -v sync.tgz)
 base64 < "$tmp/sync.tgz" > "$tmp/sync.b64"
